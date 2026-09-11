@@ -49,29 +49,42 @@ dbt docs serve    # Serve documentation at http://localhost:8080
 ### 5. Table with Properties
 `models/marts/table_with_properties.sql` - Table with Hologres-specific properties (orientation, distribution_key, etc.)
 
-### 6. Logical Partition Table (Single Key)
-`models/marts/logical_partition_table.sql` - Logical partition table with single partition column
-
-- Partition by date column (`ds`) for efficient data management
-- Supported partition types: INT, TEXT, VARCHAR, DATE, TIMESTAMP, TIMESTAMPTZ
-- Partition keys are automatically set to NOT NULL
+### 6. Incremental Logical Partition Table (Single Key)
+`models/marts/logical_partition_table.sql` - Partition-incremental table keyed by the DATE column `ds`
 
 ```yaml
 config:
+  materialized: logical_partition_table
   logical_partition_key: 'ds'
+  incremental_partition_key: 'ds'
+  incremental_strategy: partition
+  on_schema_change: fail
 ```
 
-### 7. Logical Partition Table (Multi Keys)
-`models/marts/lpt_multi_keys.sql` - Logical partition table with 2 partition columns
+The example uses `is_incremental()` to compare the source DATE partition key with the target's latest `ds`, including that boundary partition so its complete contents are replaced.
 
-- Supports up to 2 partition columns (e.g., year + month)
-- Useful for hierarchical time-based partitioning
-- Query optimization: filtering by partition keys scans only relevant partitions
+### 7. Incremental Logical Partition Table (Multiple Keys)
+`models/marts/lpt_multi_keys.sql` - Partition-incremental table with two ordered partition columns
 
 ```yaml
 config:
+  materialized: logical_partition_table
   logical_partition_key: 'order_year, order_month'
+  incremental_partition_key: 'order_year, order_month'
+  incremental_strategy: partition
+  on_schema_change: fail
 ```
+
+The example compares `(order_year, order_month)` with the target's latest key tuple. Comparing only `order_year` or `order_month` would select the wrong monthly boundary.
+
+#### Partition-incremental behavior and safety
+
+- `logical_partition_key` is required and supports 1-2 comma-separated INT, TEXT, VARCHAR, DATE, TIMESTAMP, or TIMESTAMPTZ columns. Partition columns are set to NOT NULL.
+- `incremental_partition_key` is optional; when configured, it must exactly match `logical_partition_key`, including order. It enables incremental runs for an existing table and makes `is_incremental()` return true.
+- `incremental_strategy` defaults to `partition` and is the only supported strategy. Do not configure `unique_key`; the strategy operates on partitions, not individual rows.
+- Each incremental model result must contain every row for every partition key present in that result. The strategy deletes those complete target partitions before inserting the result, so row-level filtering would create a partial backfill.
+- The first run and `--full-refresh` rebuild the table. The legacy `materialized: table` plus `logical_partition_key` mode also remains full-rebuild only; omitting `incremental_partition_key` from the dedicated materialization does the same.
+- Hologres connections use autocommit with `BEGIN` disabled. `DELETE + INSERT` has no guaranteed cross-statement atomicity, so a failure between the operations may require recovery or `--full-refresh`.
 
 ## Seed Data
 

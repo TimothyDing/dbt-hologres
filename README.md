@@ -145,23 +145,31 @@ Supported configurations:
 
 ### Logical Partition Tables
 
-Logical Partition Tables enable efficient data management and query optimization:
+Use the dedicated materialization to incrementally replace complete logical partitions:
 
-```yaml
-models:
-  my_model:
-    materialized: table
-    logical_partition_key: 'ds'  # Single partition key
-    # or for multiple keys:
-    # logical_partition_key: 'order_year, order_month'
+```sql
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds',
+    incremental_partition_key='ds',
+    incremental_strategy='partition',
+    on_schema_change='fail'
+) }}
 ```
 
-Supported configurations:
+Supported configurations and behavior:
 
-- `logical_partition_key`: Partition column(s), supports 1-2 columns separated by comma
-- Supported types: INT, TEXT, VARCHAR, DATE, TIMESTAMP, TIMESTAMPTZ
-- Partition keys are automatically set to NOT NULL
-- Works with table properties like `orientation`, `distribution_key`, etc.
+- `logical_partition_key` is required and accepts 1-2 comma-separated columns. Supported types are INT, TEXT, VARCHAR, DATE, TIMESTAMP, and TIMESTAMPTZ; partition keys are set to NOT NULL.
+- `incremental_partition_key` enables partition-incremental runs. It is optional, but when set it must exactly match `logical_partition_key`, including column order.
+- `incremental_strategy` defaults to `partition` and no other strategy is supported by this materialization. `unique_key` is not used.
+- The first run and `--full-refresh` rebuild the complete table. On an incremental run, `is_incremental()` returns true, and every target partition represented in the model result is deleted and then reinserted.
+- The model result must contain the complete data for every partition key it includes. Filtering to only changed rows would delete the rest of those partitions and produce partial backfills; filter on the actual partition key and include the boundary partition.
+- The legacy `materialized='table'` plus `logical_partition_key` configuration remains supported, but it always performs a full table rebuild. Omitting `incremental_partition_key` from the dedicated materialization also results in a full rebuild.
+- Table properties such as `orientation` and `distribution_key` remain supported.
+
+For two-column partitions, compare the complete ordered tuple when selecting a batch—for example, `(order_year, order_month)` against the target's latest `(order_year, order_month)`—rather than filtering on only one column.
+
+> **Non-atomic replacement:** Hologres connections use autocommit and disable `BEGIN`. The partition strategy therefore does not guarantee cross-statement atomicity for its `DELETE + INSERT`; plan recovery or a full refresh if a run fails between those operations.
 
 ### LocalDate Date Utilities
 
