@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- **Logical Partition Incremental Refresh**:
+  - Added the `logical_partition_table` materialization for partition-level `DELETE + INSERT` refreshes
+  - Added `incremental_partition_key` and `incremental_strategy='partition'`; `incremental_partition_key` must match `logical_partition_key` in order
+  - Preserved the legacy full-rebuild behavior for `materialized='table'` with `logical_partition_key`
+
 ## [1.1.3]
 
 ### Improvements

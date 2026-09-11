@@ -13,7 +13,7 @@
               and relation is not none
               and relation.type == 'table'
               and model.config.materialized == 'logical_partition_table'
-              and config.get('incremental_strategy', 'partition') == 'partition'
+              and (config.get('incremental_strategy') or 'partition') == 'partition'
               and not should_full_refresh() %}
             {% set raw_incremental_partition_key = config.get('incremental_partition_key', none) %}
             {% if raw_incremental_partition_key is not none %}

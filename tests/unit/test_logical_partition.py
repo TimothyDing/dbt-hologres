@@ -245,6 +245,8 @@ class TestPartitionConfigurationMacros:
             ("ds,,region", False),
             ("ds,ds", False),
             ("year,month,day", False),
+            (["ds"], False),
+            (1, False),
         ],
     )
     def test_parse_partition_keys_rejects_invalid_values(self, raw_value, required):
@@ -428,22 +430,25 @@ class TestLogicalPartitionMacroRendering:
 
 class TestPartitionStrategySQL:
     @pytest.mark.parametrize(
-        "partition_columns,expected_target,expected_source",
+        "partition_columns,expected_conditions",
         [
             (
                 ["ds"],
-                'DBT_INTERNAL_DEST."ds"',
-                'DBT_INTERNAL_SOURCE."ds"',
+                [
+                    'DBT_INTERNAL_SOURCE."ds" = DBT_INTERNAL_DEST."ds"',
+                ],
             ),
             (
                 ["year", "month"],
-                'DBT_INTERNAL_DEST."year", DBT_INTERNAL_DEST."month"',
-                'DBT_INTERNAL_SOURCE."year", DBT_INTERNAL_SOURCE."month"',
+                [
+                    'DBT_INTERNAL_SOURCE."year" = DBT_INTERNAL_DEST."year"',
+                    'DBT_INTERNAL_SOURCE."month" = DBT_INTERNAL_DEST."month"',
+                ],
             ),
         ],
     )
     def test_partition_strategy_quotes_and_qualifies_partition_keys(
-        self, partition_columns, expected_target, expected_source
+        self, partition_columns, expected_conditions
     ):
         macros = load_partition_strategy_macros()
         columns = [
@@ -460,9 +465,12 @@ class TestPartitionStrategySQL:
             columns,
         )
 
-        assert f"where ({expected_target}) in" in result
-        assert f"select distinct {expected_source}" in result
+        assert "where exists (" in result
+        assert "select 1" in result
+        for expected_condition in expected_conditions:
+            assert expected_condition in result
         assert "from analytics.source as DBT_INTERNAL_SOURCE" in result
+        assert " in (" not in result
 
     def test_partition_strategy_uses_explicit_quoted_insert_columns(self):
         macros = load_partition_strategy_macros()
@@ -589,6 +597,17 @@ class TestIsIncrementalMacro:
                 {
                     "logical_partition_key": "ds",
                     "incremental_partition_key": "ds",
+                },
+                False,
+                True,
+            ),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                    "incremental_strategy": None,
                 },
                 False,
                 True,
@@ -982,6 +1001,20 @@ with (
 
 class TestLogicalPartitionIntegration:
     """Test logical partition integration with other features."""
+
+    def test_multi_key_example_uses_scalar_boundary_subqueries(self):
+        """Hologres rejects row-value subqueries, so the example must compare scalar keys."""
+        example = (
+            Path(__file__).resolve().parents[2]
+            / "examples"
+            / "models"
+            / "marts"
+            / "lpt_multi_keys.sql"
+        ).read_text()
+
+        assert "(order_year, order_month) >= (" not in example
+        assert "order_year > (select max(order_year)" in example
+        assert "order_month >= (" in example
 
     def test_logical_partition_with_index_config(self):
         """Test logical partition can be used with index config."""

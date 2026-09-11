@@ -31,13 +31,17 @@ partition_batch as (
     from orders
 
     {% if is_incremental() %}
-    -- Compare the full tuple so a new year does not collide with an earlier month.
+    -- Compare both keys in scalar subqueries; Hologres does not support
+    -- row-value subqueries. This is equivalent to ordered tuple comparison.
     where not exists (select 1 from {{ this }})
-       or (order_year, order_month) >= (
-            select order_year, order_month
-            from {{ this }}
-            order by order_year desc, order_month desc
-            limit 1
+       or order_year > (select max(order_year) from {{ this }})
+       or (
+            order_year = (select max(order_year) from {{ this }})
+            and order_month >= (
+                select max(order_month)
+                from {{ this }}
+                where order_year = (select max(order_year) from {{ this }})
+            )
        )
     {% endif %}
 )

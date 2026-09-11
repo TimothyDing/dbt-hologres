@@ -158,6 +158,102 @@ select
 from generate_series(0, 60) as s(i)
 """
 
+# Logical partition table fixtures with deterministic incremental batches
+models__logical_partition_incremental_initial = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds',
+    incremental_partition_key='ds'
+) }}
+
+select date '2024-01-01' as ds, 1::bigint as id, 'history'::text as value
+union all
+select date '2024-01-02' as ds, 2::bigint as id, 'old-2'::text as value
+union all
+select date '2024-01-02' as ds, 3::bigint as id, 'old-3'::text as value
+"""
+
+models__logical_partition_incremental_update = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds',
+    incremental_partition_key='ds'
+) }}
+
+select date '2024-01-02' as ds, 2::bigint as id, 'new-2'::text as value
+union all
+select date '2024-01-02' as ds, 4::bigint as id, 'new-4'::text as value
+"""
+
+models__logical_partition_incremental_empty = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds',
+    incremental_partition_key='ds'
+) }}
+
+select date '2024-01-01' as ds, 0::bigint as id, 'empty'::text as value
+where false
+"""
+
+models__logical_partition_incremental_dual_initial = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='yy, mm',
+    incremental_partition_key='yy, mm'
+) }}
+
+select 2024::integer as yy, 1::integer as mm, 1::bigint as id, 'jan-old'::text as value
+union all
+select 2024::integer as yy, 2::integer as mm, 2::bigint as id, 'feb-history'::text as value
+"""
+
+models__logical_partition_incremental_dual_update = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='yy, mm',
+    incremental_partition_key='yy, mm'
+) }}
+
+select 2024::integer as yy, 1::integer as mm, 3::bigint as id, 'jan-new'::text as value
+"""
+
+models__logical_partition_full_rebuild_initial = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds'
+) }}
+
+select date '2024-01-01' as ds, 1::bigint as id, 'old'::text as value
+union all
+select date '2024-01-02' as ds, 2::bigint as id, 'old'::text as value
+"""
+
+models__logical_partition_full_rebuild_update = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds'
+) }}
+
+select date '2024-02-01' as ds, 10::bigint as id, 'rebuilt'::text as value
+"""
+
+models__logical_partition_is_incremental = """
+{{ config(
+    materialized='logical_partition_table',
+    logical_partition_key='ds',
+    incremental_partition_key='ds'
+) }}
+
+{% if is_incremental() %}
+select date '2024-01-02' as ds, 2::bigint as id, 'incremental'::text as value
+{% else %}
+select date '2024-01-01' as ds, 1::bigint as id, 'history'::text as value
+union all
+select date '2024-01-02' as ds, 2::bigint as id, 'initial'::text as value
+{% endif %}
+"""
+
 # Model with clustering keys
 # Note: Hologres doesn't support random() function (Single Row Volatile functions)
 models__table_with_clustering_keys = """

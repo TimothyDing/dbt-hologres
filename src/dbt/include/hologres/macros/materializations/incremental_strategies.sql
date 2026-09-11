@@ -54,22 +54,27 @@
 
 {% macro hologres__get_partition_strategy_sql(target, source, partition_columns, dest_columns) -%}
     {%- set dest_cols_csv = get_quoted_csv(dest_columns | map(attribute="name")) -%}
-    {%- set target_partition_columns = [] -%}
-    {%- set source_partition_columns = [] -%}
+    {%- set partition_join_conditions = [] -%}
     {%- set source_columns = [] -%}
 
     {%- for partition_column in partition_columns -%}
-        {%- do target_partition_columns.append('DBT_INTERNAL_DEST.' ~ adapter.quote(partition_column)) -%}
-        {%- do source_partition_columns.append('DBT_INTERNAL_SOURCE.' ~ adapter.quote(partition_column)) -%}
+        {%- do partition_join_conditions.append(
+              'DBT_INTERNAL_SOURCE.' ~ adapter.quote(partition_column)
+              ~ ' = DBT_INTERNAL_DEST.' ~ adapter.quote(partition_column)) -%}
     {%- endfor -%}
     {%- for dest_column in dest_columns -%}
         {%- do source_columns.append('DBT_INTERNAL_SOURCE.' ~ adapter.quote(dest_column.name)) -%}
     {%- endfor -%}
 
     delete from {{ target }} as DBT_INTERNAL_DEST
-    where ({{ target_partition_columns | join(', ') }}) in (
-        select distinct {{ source_partition_columns | join(', ') }}
+    where exists (
+        select 1
         from {{ source }} as DBT_INTERNAL_SOURCE
+        where
+        {%- for partition_join_condition in partition_join_conditions %}
+          {{ partition_join_condition }}
+          {%- if not loop.last %}and{% endif %}
+        {%- endfor %}
     );
 
     insert into {{ target }} ({{ dest_cols_csv }})

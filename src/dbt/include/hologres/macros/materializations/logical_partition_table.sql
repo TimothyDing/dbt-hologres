@@ -11,7 +11,7 @@
     {%- do hologres__validate_incremental_partition_keys(
           logical_partition_columns, incremental_partition_columns) -%}
   {%- endif -%}
-  {%- set incremental_strategy = config.get('incremental_strategy', 'partition') -%}
+  {%- set incremental_strategy = config.get('incremental_strategy') or 'partition' -%}
   {%- if incremental_strategy != 'partition' -%}
     {% do exceptions.raise_compiler_error("materialized='logical_partition_table' only supports incremental_strategy='partition'") %}
   {%- endif -%}
