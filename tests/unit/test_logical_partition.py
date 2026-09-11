@@ -3,11 +3,72 @@
 These tests verify the configuration and DDL generation for logical
 partition tables in Hologres.
 """
-import pytest
+from pathlib import Path
+import re
+from types import SimpleNamespace
 from unittest import mock
-from jinja2 import Template
+
+from jinja2 import Environment, FileSystemLoader, Template
+from jinja2.nativetypes import NativeEnvironment
+import pytest
 
 from dbt.adapters.hologres.impl import HologresConfig
+
+
+MACROS_DIR = (
+    Path(__file__).resolve().parents[2] / "src" / "dbt" / "include" / "hologres" / "macros"
+)
+
+
+class CompilerError(Exception):
+    pass
+
+
+def raise_compiler_error(message):
+    raise CompilerError(message)
+
+
+def load_adapters_macros(config_values=None):
+    environment = NativeEnvironment(
+        loader=FileSystemLoader(MACROS_DIR),
+        extensions=["jinja2.ext.do"],
+    )
+    environment.globals.update(
+        {
+            "adapter": SimpleNamespace(quote=lambda identifier: f'"{identifier}"'),
+            "config": config_values or {},
+            "exceptions": SimpleNamespace(raise_compiler_error=raise_compiler_error),
+            "get_quoted_csv": lambda columns: ", ".join(
+                f'"{column}"' for column in columns
+            ),
+            "return": lambda value: value,
+        }
+    )
+    return environment.get_template("adapters.sql").make_module()
+
+
+def load_materialization(materialization_name, config_values):
+    materialization_path = MACROS_DIR / "materializations" / f"{materialization_name}.sql"
+    source = materialization_path.read_text()
+    source = re.sub(
+        r"\{%[-]?\s*materialization\b.*?%\}",
+        "{% macro materialization() %}",
+        source,
+        count=1,
+    )
+    source = re.sub(
+        r"\{%[-]?\s*endmaterialization\s*[-]?%\}",
+        "{% endmacro %}",
+        source,
+        count=1,
+    )
+
+    environment = Environment(extensions=["jinja2.ext.do"])
+    environment.globals.update(
+        config=config_values,
+        exceptions=SimpleNamespace(raise_compiler_error=raise_compiler_error),
+    )
+    return environment.from_string(source).make_module().materialization
 
 
 class TestLogicalPartitionConfig:
@@ -39,6 +100,14 @@ class TestLogicalPartitionConfig:
         config = HologresConfig()
         assert config.logical_partition_key is None
 
+    def test_incremental_partition_key_config(self):
+        config = HologresConfig(incremental_partition_key="ds, region")
+
+        assert config.incremental_partition_key == "ds, region"
+
+    def test_incremental_partition_key_defaults_to_none(self):
+        assert HologresConfig().incremental_partition_key is None
+
     def test_partition_key_with_clustering_key(self):
         """Test config with partition key and clustering key."""
         config = HologresConfig(
@@ -47,6 +116,162 @@ class TestLogicalPartitionConfig:
         )
         assert config.logical_partition_key == "region"
         assert config.clustering_key == "created_at"
+
+
+class TestPartitionConfigurationMacros:
+    def test_parse_partition_keys_trims_columns(self):
+        macros = load_adapters_macros()
+
+        result = macros.hologres__parse_partition_keys(
+            "  ds  ,  region  ", "logical_partition_key"
+        )
+
+        assert result == ["ds", "region"]
+
+    def test_parse_partition_keys_allows_missing_optional_config(self):
+        macros = load_adapters_macros()
+
+        result = macros.hologres__parse_partition_keys(
+            None, "incremental_partition_key"
+        )
+
+        assert result == []
+
+    @pytest.mark.parametrize(
+        "raw_value,required",
+        [
+            (None, True),
+            ("", False),
+            ("   ", False),
+            ("ds,", False),
+            (",ds", False),
+            ("ds,,region", False),
+            ("ds,ds", False),
+            ("year,month,day", False),
+        ],
+    )
+    def test_parse_partition_keys_rejects_invalid_values(self, raw_value, required):
+        macros = load_adapters_macros()
+
+        with pytest.raises(CompilerError, match="logical_partition_key"):
+            macros.hologres__parse_partition_keys(
+                raw_value, "logical_partition_key", required
+            )
+
+    def test_validate_partition_columns_accepts_existing_columns(self):
+        macros = load_adapters_macros()
+        columns = [
+            SimpleNamespace(column="id"),
+            SimpleNamespace(column="ds"),
+        ]
+
+        macros.hologres__validate_partition_columns(
+            columns, ["ds"], "logical_partition_key"
+        )
+
+    def test_validate_partition_columns_rejects_missing_columns(self):
+        macros = load_adapters_macros()
+        columns = [SimpleNamespace(column="id")]
+
+        with pytest.raises(CompilerError, match="logical_partition_key"):
+            macros.hologres__validate_partition_columns(
+                columns, ["ds"], "logical_partition_key"
+            )
+
+    def test_validate_incremental_partition_keys_accepts_exact_match(self):
+        macros = load_adapters_macros()
+
+        macros.hologres__validate_incremental_partition_keys(
+            ["year", "month"], ["year", "month"]
+        )
+
+    @pytest.mark.parametrize(
+        "incremental_columns",
+        [
+            ["month", "year"],
+            ["year"],
+            ["year", "day"],
+        ],
+    )
+    def test_validate_incremental_partition_keys_rejects_non_exact_match(
+        self, incremental_columns
+    ):
+        macros = load_adapters_macros()
+
+        with pytest.raises(CompilerError, match="incremental_partition_key"):
+            macros.hologres__validate_incremental_partition_keys(
+                ["year", "month"], incremental_columns
+            )
+
+    def test_build_table_properties_preserves_supported_configs(self):
+        macros = load_adapters_macros(
+            {
+                "orientation": "column",
+                "distribution_key": "id",
+                "clustering_key": "created_at",
+                "event_time_column": "event_at",
+                "segment_key": "ignored_alias",
+                "bitmap_columns": "status,type",
+                "dictionary_encoding_columns": "region",
+            }
+        )
+
+        assert macros.hologres__build_table_properties() == [
+            "orientation = 'column'",
+            "distribution_key = 'id'",
+            "clustering_key = 'created_at'",
+            "event_time_column = 'event_at'",
+            "bitmap_columns = 'status,type'",
+            "dictionary_encoding_columns = 'region'",
+        ]
+
+    def test_build_table_properties_uses_segment_key_alias(self):
+        macros = load_adapters_macros({"segment_key": "created_at"})
+
+        assert macros.hologres__build_table_properties() == [
+            "event_time_column = 'created_at'"
+        ]
+
+
+class TestLogicalPartitionMacroRendering:
+    def test_logical_partition_ddl_quotes_all_column_identifiers(self):
+        macros = load_adapters_macros()
+        columns = [
+            SimpleNamespace(column="Order", data_type="BIGINT"),
+            SimpleNamespace(column="select", data_type="TEXT"),
+            SimpleNamespace(column="ds", data_type="DATE"),
+        ]
+
+        result = macros.hologres__create_logical_partition_table_ddl(
+            "analytics.fact_orders",
+            columns,
+            ["Order", "ds"],
+            [],
+        )
+
+        assert '"Order" BIGINT not null' in result
+        assert '"select" TEXT' in result
+        assert '"ds" DATE not null' in result
+        assert 'logical partition by list ("Order", "ds")' in result
+
+
+class TestPartitionConfigMisuse:
+    @pytest.mark.parametrize("materialization_name", ["table", "incremental"])
+    @pytest.mark.parametrize(
+        "config_values",
+        [
+            {"incremental_partition_key": "ds"},
+            {"incremental_partition_key": ""},
+            {"incremental_strategy": "partition"},
+        ],
+    )
+    def test_rejects_partition_incremental_config_before_relation_operations(
+        self, materialization_name, config_values
+    ):
+        materialization = load_materialization(materialization_name, config_values)
+
+        with pytest.raises(CompilerError, match="logical_partition_table"):
+            materialization()
 
 
 class TestLogicalPartitionDDL:

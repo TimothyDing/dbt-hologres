@@ -1,5 +1,11 @@
 {% materialization incremental, adapter='hologres' -%}
 
+  {%- set incremental_partition_key = config.get('incremental_partition_key', none) -%}
+  {%- set configured_incremental_strategy = config.get('incremental_strategy', none) -%}
+  {%- if incremental_partition_key is not none or configured_incremental_strategy == 'partition' -%}
+    {% do exceptions.raise_compiler_error("incremental_partition_key and incremental_strategy='partition' require materialized='logical_partition_table'") %}
+  {%- endif -%}
+
   -- relations
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') -%}

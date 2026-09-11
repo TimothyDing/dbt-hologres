@@ -39,6 +39,7 @@ class TestHologresAdapter:
         assert "delete+insert" in strategies
         assert "merge" in strategies
         assert "microbatch" in strategies
+        assert "partition" not in strategies
 
     def test_timestamp_add_sql(self):
         """Test timestamp_add_sql generates correct SQL."""

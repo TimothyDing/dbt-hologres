@@ -44,6 +44,7 @@ class HologresConfig(AdapterConfig):
     # Logical partition configuration (supports 1-2 columns)
     # Example: 'ds' for single key, 'yy,mm' for two keys
     logical_partition_key: Optional[str] = None
+    incremental_partition_key: Optional[str] = None
 
 
 class HologresAdapter(SQLAdapter):

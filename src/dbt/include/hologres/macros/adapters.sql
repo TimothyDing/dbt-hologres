@@ -1,3 +1,82 @@
+{% macro hologres__parse_partition_keys(raw_value, config_name, required=false) -%}
+  {%- set partition_columns = [] -%}
+  {%- if raw_value is none -%}
+    {%- if required -%}
+      {% do exceptions.raise_compiler_error(config_name ~ " is required") %}
+    {%- endif -%}
+  {%- else -%}
+    {%- if raw_value is not string -%}
+      {% do exceptions.raise_compiler_error(config_name ~ " must be a comma-separated string") %}
+    {%- endif -%}
+    {%- if raw_value | trim == '' -%}
+      {% do exceptions.raise_compiler_error(config_name ~ " must not be empty") %}
+    {%- endif -%}
+    {%- for raw_column in raw_value.split(',') -%}
+      {%- set column_name = raw_column | trim -%}
+      {%- if column_name == '' -%}
+        {% do exceptions.raise_compiler_error(config_name ~ " must not contain empty column names") %}
+      {%- endif -%}
+      {%- if column_name in partition_columns -%}
+        {% do exceptions.raise_compiler_error(config_name ~ " contains duplicate column '" ~ column_name ~ "'") %}
+      {%- endif -%}
+      {%- do partition_columns.append(column_name) -%}
+    {%- endfor -%}
+    {%- if partition_columns | length > 2 -%}
+      {% do exceptions.raise_compiler_error(config_name ~ " supports at most 2 columns") %}
+    {%- endif -%}
+  {%- endif -%}
+  {{ return(partition_columns) }}
+{%- endmacro %}
+
+{% macro hologres__validate_partition_columns(columns, partition_columns, config_name) -%}
+  {%- set available_columns = columns | map(attribute='column') | list -%}
+  {%- for partition_column in partition_columns -%}
+    {%- if partition_column not in available_columns -%}
+      {% do exceptions.raise_compiler_error(config_name ~ " column '" ~ partition_column ~ "' is not present in the relation") %}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro %}
+
+{% macro hologres__validate_incremental_partition_keys(logical_columns, incremental_columns) -%}
+  {%- if logical_columns != incremental_columns -%}
+    {% do exceptions.raise_compiler_error("incremental_partition_key must exactly match logical_partition_key, including column order") %}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro hologres__build_table_properties() -%}
+  {%- set orientation = config.get('orientation', none) -%}
+  {%- set distribution_key = config.get('distribution_key', none) -%}
+  {%- set clustering_key = config.get('clustering_key', none) -%}
+  {%- set event_time_column = config.get('event_time_column', none) -%}
+  {%- set segment_key = config.get('segment_key', none) -%}
+  {%- set bitmap_columns = config.get('bitmap_columns', none) -%}
+  {%- set dictionary_encoding_columns = config.get('dictionary_encoding_columns', none) -%}
+  {%- if event_time_column is none and segment_key is not none -%}
+    {%- set event_time_column = segment_key -%}
+  {%- endif -%}
+
+  {%- set with_properties = [] -%}
+  {%- if orientation is not none -%}
+    {%- do with_properties.append("orientation = '" ~ orientation ~ "'") -%}
+  {%- endif -%}
+  {%- if distribution_key is not none -%}
+    {%- do with_properties.append("distribution_key = '" ~ distribution_key ~ "'") -%}
+  {%- endif -%}
+  {%- if clustering_key is not none -%}
+    {%- do with_properties.append("clustering_key = '" ~ clustering_key ~ "'") -%}
+  {%- endif -%}
+  {%- if event_time_column is not none -%}
+    {%- do with_properties.append("event_time_column = '" ~ event_time_column ~ "'") -%}
+  {%- endif -%}
+  {%- if bitmap_columns is not none -%}
+    {%- do with_properties.append("bitmap_columns = '" ~ bitmap_columns ~ "'") -%}
+  {%- endif -%}
+  {%- if dictionary_encoding_columns is not none -%}
+    {%- do with_properties.append("dictionary_encoding_columns = '" ~ dictionary_encoding_columns ~ "'") -%}
+  {%- endif -%}
+  {{ return(with_properties) }}
+{%- endmacro %}
+
 {% macro hologres__get_create_table_as_sql(temporary, relation, sql) -%}
   {# Hologres需要在事务外执行CTAS #}
   {{ return(hologres__create_table_as(temporary, relation, sql)) }}
@@ -6,52 +85,15 @@
 {% macro hologres__create_table_as(temporary, relation, compiled_code, language='sql') -%}
   {%- if language == 'sql' -%}
     {%- set sql_header = config.get('sql_header', none) -%}
+    {%- set logical_partition_key = config.get('logical_partition_key', none) -%}
+    {%- set with_properties = hologres__build_table_properties() -%}
 
     {{ sql_header if sql_header is not none }}
 
-    {# Read table property configurations #}
-    {%- set orientation = config.get('orientation', none) -%}
-    {%- set distribution_key = config.get('distribution_key', none) -%}
-    {%- set clustering_key = config.get('clustering_key', none) -%}
-    {%- set event_time_column = config.get('event_time_column', none) -%}
-    {%- set segment_key = config.get('segment_key', none) -%}
-    {%- set bitmap_columns = config.get('bitmap_columns', none) -%}
-    {%- set dictionary_encoding_columns = config.get('dictionary_encoding_columns', none) -%}
-    {%- set logical_partition_key = config.get('logical_partition_key', none) -%}
-
-    {# Handle segment_key as alias for event_time_column #}
-    {%- if event_time_column is none and segment_key is not none -%}
-      {%- set event_time_column = segment_key -%}
-    {%- endif -%}
-
-    {# Build WITH clause properties list #}
-    {%- set with_properties = [] -%}
-    {%- if orientation is not none -%}
-      {%- do with_properties.append("orientation = '" ~ orientation ~ "'") -%}
-    {%- endif -%}
-    {%- if distribution_key is not none -%}
-      {%- do with_properties.append("distribution_key = '" ~ distribution_key ~ "'") -%}
-    {%- endif -%}
-    {%- if clustering_key is not none -%}
-      {%- do with_properties.append("clustering_key = '" ~ clustering_key ~ "'") -%}
-    {%- endif -%}
-    {%- if event_time_column is not none -%}
-      {%- do with_properties.append("event_time_column = '" ~ event_time_column ~ "'") -%}
-    {%- endif -%}
-    {%- if bitmap_columns is not none -%}
-      {%- do with_properties.append("bitmap_columns = '" ~ bitmap_columns ~ "'") -%}
-    {%- endif -%}
-    {%- if dictionary_encoding_columns is not none -%}
-      {%- do with_properties.append("dictionary_encoding_columns = '" ~ dictionary_encoding_columns ~ "'") -%}
-    {%- endif -%}
-
     {# Hologres不支持TEMPORARY TABLE，忽略temporary参数 #}
     {%- if logical_partition_key is not none -%}
-      {# 逻辑分区表：此处仅返回普通CTAS，实际的逻辑分区表创建在materialization中处理 #}
-      {# 这个分支仅用于向后兼容，实际逻辑分区表创建应通过hologres__create_logical_partition_table_from_ctas macro #}
       {% do exceptions.raise_compiler_error("逻辑分区表(logical_partition_key)需要使用table materialization，请确保materialized='table'") %}
     {%- else -%}
-      {# 普通表使用CTAS #}
       create table {{ relation }}
       {%- if with_properties | length > 0 %}
       with (
@@ -63,7 +105,6 @@
       );
     {%- endif -%}
   {%- elif language == 'python' -%}
-    {# Python models也不使用temporary #}
     {{ py_write_table(compiled_code=compiled_code, target_relation=relation, temporary=false) }}
   {%- else -%}
     {% do exceptions.raise_compiler_error("hologres__create_table_as macro didn't get supported language " ~ language) %}
@@ -80,42 +121,27 @@
 {%- endmacro %}
 
 {% macro hologres__build_column_definitions(columns, partition_columns) -%}
-  {#
-    构建列定义字符串，分区键列添加NOT NULL约束
-    参数:
-    - columns: 列信息列表
-    - partition_columns: 分区键列名列表
-  #}
   {%- set col_defs = [] -%}
   {%- for col in columns -%}
     {%- set col_name = col.column -%}
-    {# 使用 data_type 属性获取完整类型定义（包含精度信息） #}
     {%- set col_type = col.data_type -%}
+    {%- set quoted_col_name = adapter.quote(col_name) -%}
     {%- if col_name in partition_columns -%}
-      {%- do col_defs.append(col_name ~ ' ' ~ col_type ~ ' not null') -%}
+      {%- do col_defs.append(quoted_col_name ~ ' ' ~ col_type ~ ' not null') -%}
     {%- else -%}
-      {%- do col_defs.append(col_name ~ ' ' ~ col_type) -%}
+      {%- do col_defs.append(quoted_col_name ~ ' ' ~ col_type) -%}
     {%- endif -%}
   {%- endfor -%}
   {{ return(col_defs | join(', ')) }}
 {%- endmacro %}
 
-{% macro hologres__create_logical_partition_table_ddl(relation, columns, logical_partition_key, with_properties) -%}
-  {#
-    生成创建逻辑分区表的DDL语句
-    参数:
-    - relation: 目标表
-    - columns: 列信息列表
-    - logical_partition_key: 分区键，支持1-2个列，用逗号分隔
-    - with_properties: WITH子句属性列表
-  #}
-  {%- set partition_columns = logical_partition_key.split(',') | map('trim') | list -%}
+{% macro hologres__create_logical_partition_table_ddl(relation, columns, partition_columns, with_properties) -%}
   {%- set column_defs = hologres__build_column_definitions(columns, partition_columns) -%}
-  
+
   create table {{ relation }} (
     {{ column_defs }}
   )
-  logical partition by list ({{ partition_columns | join(', ') }})
+  logical partition by list ({{ get_quoted_csv(partition_columns) }})
   {%- if with_properties | length > 0 %}
   with (
     {{ with_properties | join(',\n    ') }}
