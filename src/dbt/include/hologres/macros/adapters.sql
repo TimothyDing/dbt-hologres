@@ -39,7 +39,7 @@
 
 {% macro hologres__validate_incremental_partition_keys(logical_columns, incremental_columns) -%}
   {%- if logical_columns != incremental_columns -%}
-    {% do exceptions.raise_compiler_error("incremental_partition_key must exactly match logical_partition_key, including column order") %}
+    {% do exceptions.raise_compiler_error("incremental_partition_key must exactly match logical_partition_key, including column order; use --full-refresh after changing the partition definition") %}
   {%- endif -%}
 {%- endmacro %}
 

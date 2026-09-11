@@ -63,12 +63,79 @@ def load_materialization(materialization_name, config_values):
         count=1,
     )
 
+    adapter_macros = load_adapters_macros(config_values)
     environment = Environment(extensions=["jinja2.ext.do"])
     environment.globals.update(
         config=config_values,
         exceptions=SimpleNamespace(raise_compiler_error=raise_compiler_error),
+        hologres__parse_partition_keys=(
+            adapter_macros.hologres__parse_partition_keys
+        ),
+        hologres__validate_incremental_partition_keys=(
+            adapter_macros.hologres__validate_incremental_partition_keys
+        ),
     )
     return environment.from_string(source).make_module().materialization
+
+
+def load_partition_strategy_macros():
+    environment = NativeEnvironment(
+        loader=FileSystemLoader(MACROS_DIR),
+        extensions=["jinja2.ext.do"],
+    )
+    environment.globals.update(
+        adapter=SimpleNamespace(quote=lambda identifier: f'"{identifier}"'),
+        get_quoted_csv=lambda columns: ", ".join(
+            f'"{column}"' for column in columns
+        ),
+    )
+    return environment.get_template(
+        "materializations/incremental_strategies.sql"
+    ).make_module()
+
+
+def render_is_incremental(
+    materialized,
+    relation,
+    config_values=None,
+    *,
+    execute=True,
+    full_refresh=False,
+    get_relation=None,
+):
+    adapter_macros = load_adapters_macros(config_values)
+    environment = NativeEnvironment(
+        loader=FileSystemLoader(MACROS_DIR),
+        extensions=["jinja2.ext.do"],
+    )
+    relation_loader = get_relation or (lambda *_args: relation)
+    environment.globals.update(
+        {
+            "adapter": SimpleNamespace(get_relation=relation_loader),
+            "config": config_values or {},
+            "execute": execute,
+            "hologres__parse_partition_keys": (
+                adapter_macros.hologres__parse_partition_keys
+            ),
+            "hologres__validate_incremental_partition_keys": (
+                adapter_macros.hologres__validate_incremental_partition_keys
+            ),
+            "model": SimpleNamespace(
+                config=SimpleNamespace(materialized=materialized)
+            ),
+            "return": lambda value: value,
+            "should_full_refresh": lambda: full_refresh,
+            "this": SimpleNamespace(
+                database="db", schema="schema", table="model"
+            ),
+        }
+    )
+    rendered = environment.get_template(
+        "materializations/is_incremental.sql"
+    ).make_module().is_incremental()
+    if isinstance(rendered, bool):
+        return rendered
+    return rendered.strip() == "True"
 
 
 class TestLogicalPartitionConfig:
@@ -198,7 +265,10 @@ class TestPartitionConfigurationMacros:
     ):
         macros = load_adapters_macros()
 
-        with pytest.raises(CompilerError, match="incremental_partition_key"):
+        with pytest.raises(
+            CompilerError,
+            match="incremental_partition_key.*--full-refresh",
+        ):
             macros.hologres__validate_incremental_partition_keys(
                 ["year", "month"], incremental_columns
             )
@@ -253,6 +323,225 @@ class TestLogicalPartitionMacroRendering:
         assert '"select" TEXT' in result
         assert '"ds" DATE not null' in result
         assert 'logical partition by list ("Order", "ds")' in result
+
+
+class TestPartitionStrategySQL:
+    @pytest.mark.parametrize(
+        "partition_columns,expected_target,expected_source",
+        [
+            (
+                ["ds"],
+                'DBT_INTERNAL_DEST."ds"',
+                'DBT_INTERNAL_SOURCE."ds"',
+            ),
+            (
+                ["year", "month"],
+                'DBT_INTERNAL_DEST."year", DBT_INTERNAL_DEST."month"',
+                'DBT_INTERNAL_SOURCE."year", DBT_INTERNAL_SOURCE."month"',
+            ),
+        ],
+    )
+    def test_partition_strategy_quotes_and_qualifies_partition_keys(
+        self, partition_columns, expected_target, expected_source
+    ):
+        macros = load_partition_strategy_macros()
+        columns = [
+            SimpleNamespace(name="id"),
+            SimpleNamespace(name="year"),
+            SimpleNamespace(name="month"),
+            SimpleNamespace(name="ds"),
+        ]
+
+        result = macros.hologres__get_partition_strategy_sql(
+            "analytics.target",
+            "analytics.source",
+            partition_columns,
+            columns,
+        )
+
+        assert f"where ({expected_target}) in" in result
+        assert f"select distinct {expected_source}" in result
+        assert "from analytics.source as DBT_INTERNAL_SOURCE" in result
+
+    def test_partition_strategy_uses_explicit_quoted_insert_columns(self):
+        macros = load_partition_strategy_macros()
+        columns = [
+            SimpleNamespace(name="Order"),
+            SimpleNamespace(name="select"),
+            SimpleNamespace(name="ds"),
+        ]
+
+        result = macros.hologres__get_partition_strategy_sql(
+            "analytics.target",
+            "analytics.source",
+            ["ds"],
+            columns,
+        )
+
+        assert (
+            'insert into analytics.target ("Order", "select", "ds")'
+            in result
+        )
+        assert (
+            'select DBT_INTERNAL_SOURCE."Order", '
+            'DBT_INTERNAL_SOURCE."select", DBT_INTERNAL_SOURCE."ds"'
+            in result
+        )
+
+
+class TestLogicalPartitionMaterializationConfig:
+    def test_requires_logical_partition_key_before_relation_operations(self):
+        materialization = load_materialization(
+            "logical_partition_table",
+            {"incremental_strategy": "partition"},
+        )
+
+        with pytest.raises(CompilerError, match="logical_partition_key is required"):
+            materialization()
+
+    def test_rejects_non_partition_strategy_before_relation_operations(self):
+        materialization = load_materialization(
+            "logical_partition_table",
+            {
+                "logical_partition_key": "ds",
+                "incremental_strategy": "append",
+            },
+        )
+
+        with pytest.raises(CompilerError, match="only supports.*partition"):
+            materialization()
+
+    def test_rejects_mismatched_incremental_partition_key(self):
+        materialization = load_materialization(
+            "logical_partition_table",
+            {
+                "logical_partition_key": "year, month",
+                "incremental_partition_key": "month, year",
+            },
+        )
+
+        with pytest.raises(CompilerError, match="incremental_partition_key"):
+            materialization()
+
+    def test_lifecycle_avoids_guarded_ctas_and_unsupported_end(self):
+        materialization_path = (
+            MACROS_DIR / "materializations" / "logical_partition_table.sql"
+        )
+        source = materialization_path.read_text()
+        source_without_comments = re.sub(
+            r"\{#.*?#\}", "", source, flags=re.DOTALL
+        )
+
+        assert "get_create_table_as_sql" not in source_without_comments
+        assert "end;" not in source_without_comments
+        assert "adapter.expand_target_column_types" in source
+        assert "process_schema_changes" in source
+        assert source.index("adapter.expand_target_column_types") < source.index(
+            "process_schema_changes"
+        )
+        assert "hologres__validate_partition_columns" in source
+        assert "adapter.rename_relation(existing_relation, backup_relation)" in source
+        assert "adapter.rename_relation(intermediate_relation, target_relation)" in source
+        assert "create_indexes(intermediate_relation)" in source
+        assert "config.get('sql_header', none)" in source
+
+
+class TestIsIncrementalMacro:
+    @pytest.mark.parametrize(
+        "materialized,relation,config_values,full_refresh,expected",
+        [
+            ("incremental", SimpleNamespace(type="table"), {}, False, True),
+            ("incremental", SimpleNamespace(type="view"), {}, False, False),
+            ("incremental", SimpleNamespace(type="table"), {}, True, False),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                },
+                False,
+                True,
+            ),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {"logical_partition_key": "ds"},
+                False,
+                False,
+            ),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="view"),
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                },
+                False,
+                False,
+            ),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                },
+                True,
+                False,
+            ),
+            (
+                "logical_partition_table",
+                None,
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                },
+                False,
+                False,
+            ),
+        ],
+    )
+    def test_incremental_conditions(
+        self,
+        materialized,
+        relation,
+        config_values,
+        full_refresh,
+        expected,
+    ):
+        assert render_is_incremental(
+            materialized,
+            relation,
+            config_values,
+            full_refresh=full_refresh,
+        ) is expected
+
+    def test_execute_false_skips_relation_lookup(self):
+        def fail_relation_lookup(*_args):
+            raise AssertionError("adapter.get_relation must not be called")
+
+        assert render_is_incremental(
+            "logical_partition_table",
+            None,
+            {
+                "logical_partition_key": "ds",
+                "incremental_partition_key": "ds",
+            },
+            execute=False,
+            get_relation=fail_relation_lookup,
+        ) is False
+
+    def test_rejects_invalid_logical_partition_incremental_config(self):
+        with pytest.raises(CompilerError, match="incremental_partition_key"):
+            render_is_incremental(
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {
+                    "logical_partition_key": "year, month",
+                    "incremental_partition_key": "month, year",
+                },
+            )
 
 
 class TestPartitionConfigMisuse:
