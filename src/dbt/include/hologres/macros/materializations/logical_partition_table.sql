@@ -61,6 +61,15 @@
     {%- endcall %}
     {%- do to_drop.append(temp_relation) -%}
 
+    {# Validate the source and the persisted target definition before any
+       schema synchronization is allowed to mutate the target table. #}
+    {%- set source_columns = adapter.get_columns_in_relation(temp_relation) -%}
+    {%- set refresh_hint = 'incremental_partition_key (use --full-refresh after changing the partition definition)' -%}
+    {%- do hologres__validate_partition_columns(
+          source_columns, incremental_partition_columns, refresh_hint) -%}
+    {%- do hologres__validate_logical_partition_definition(
+          target_relation, logical_partition_columns) -%}
+
     {%- set contract_config = config.get('contract') -%}
     {% if not contract_config or not contract_config.enforced %}
       {% do adapter.expand_target_column_types(
@@ -74,14 +83,9 @@
       {%- set dest_columns = adapter.get_columns_in_relation(existing_relation) -%}
     {%- endif -%}
 
-    {# Revalidate after schema changes so a removed or renamed partition key
-       fails before partition replacement. A changed partition definition
-       requires rebuilding the logical partition table. #}
-    {%- set source_columns = adapter.get_columns_in_relation(temp_relation) -%}
+    {# Revalidate the final target and destination columns after schema changes
+       before replacing any logical partitions. #}
     {%- set target_columns = adapter.get_columns_in_relation(target_relation) -%}
-    {%- set refresh_hint = 'incremental_partition_key (use --full-refresh after changing the partition definition)' -%}
-    {%- do hologres__validate_partition_columns(
-          source_columns, incremental_partition_columns, refresh_hint) -%}
     {%- do hologres__validate_partition_columns(
           target_columns, logical_partition_columns, refresh_hint) -%}
     {%- do hologres__validate_partition_columns(

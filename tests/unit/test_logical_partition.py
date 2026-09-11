@@ -28,7 +28,7 @@ def raise_compiler_error(message):
     raise CompilerError(message)
 
 
-def load_adapters_macros(config_values=None):
+def load_adapters_macros(config_values=None, extra_globals=None):
     environment = NativeEnvironment(
         loader=FileSystemLoader(MACROS_DIR),
         extensions=["jinja2.ext.do"],
@@ -44,7 +44,37 @@ def load_adapters_macros(config_values=None):
             "return": lambda value: value,
         }
     )
+    environment.globals.update(extra_globals or {})
     return environment.get_template("adapters.sql").make_module()
+
+
+def load_partition_metadata_macros(dump_script, is_logical_partitioned=True):
+    captured_statements = {}
+
+    def statement(name, fetch_result=False, auto_begin=True, caller=None):
+        captured_statements[name] = {
+            "sql": caller(),
+            "fetch_result": fetch_result,
+            "auto_begin": auto_begin,
+        }
+        return ""
+
+    result = SimpleNamespace(
+        table=SimpleNamespace(rows=[(is_logical_partitioned, dump_script)])
+    )
+    macros = load_adapters_macros(
+        extra_globals={
+            "load_result": lambda _name: result,
+            "modules": SimpleNamespace(re=re),
+            "statement": statement,
+        }
+    )
+    relation = SimpleNamespace(
+        schema="analytics",
+        identifier="fact_orders",
+        include=lambda **_kwargs: '"analytics"."fact_orders"',
+    )
+    return macros, relation, captured_statements
 
 
 def load_materialization(materialization_name, config_values):
@@ -303,6 +333,77 @@ class TestPartitionConfigurationMacros:
         ]
 
 
+class TestLogicalPartitionMetadata:
+    def test_reads_ordered_partition_columns_from_official_dump_function(self):
+        dump_script = """
+            CREATE TABLE "analytics"."fact_orders" (...)
+            LOGICAL PARTITION BY LIST ("EventDate", region);
+        """
+        macros, relation, statements = load_partition_metadata_macros(dump_script)
+        assert hasattr(macros, "hologres__get_logical_partition_columns")
+
+        result = macros.hologres__get_logical_partition_columns(relation)
+
+        assert result == ["EventDate", "region"]
+        statement = statements["get_logical_partition_columns"]
+        normalized_sql = " ".join(statement["sql"].split())
+        assert "hologres.hg_table_properties" in normalized_sql
+        assert "table_namespace = 'analytics'" in normalized_sql
+        assert "table_name = 'fact_orders'" in normalized_sql
+        assert "property_key = 'is_logical_partitioned_table'" in normalized_sql
+        assert """hg_dump_script('"analytics"."fact_orders"')""" in normalized_sql
+        assert statement["fetch_result"] is True
+        assert statement["auto_begin"] is False
+
+    def test_accepts_exact_existing_logical_partition_definition(self):
+        dump_script = """
+            CREATE TABLE "analytics"."fact_orders" (...)
+            LOGICAL PARTITION BY LIST ("ds", "region");
+        """
+        macros, relation, _statements = load_partition_metadata_macros(dump_script)
+        assert hasattr(macros, "hologres__validate_logical_partition_definition")
+
+        macros.hologres__validate_logical_partition_definition(
+            relation, ["ds", "region"]
+        )
+
+    @pytest.mark.parametrize(
+        "dump_script,is_logical_partitioned,configured_columns",
+        [
+            (
+                "CREATE TABLE analytics.fact_orders (...) "
+                "LOGICAL PARTITION BY LIST (ds);",
+                False,
+                ["ds"],
+            ),
+            (
+                "CREATE TABLE analytics.fact_orders (...) "
+                "LOGICAL PARTITION BY LIST (ds);",
+                True,
+                ["region"],
+            ),
+            (
+                "CREATE TABLE analytics.fact_orders (...) "
+                "LOGICAL PARTITION BY LIST (month, year);",
+                True,
+                ["year", "month"],
+            ),
+        ],
+    )
+    def test_rejects_nonmatching_existing_logical_partition_definition(
+        self, dump_script, is_logical_partitioned, configured_columns
+    ):
+        macros, relation, _statements = load_partition_metadata_macros(
+            dump_script, is_logical_partitioned
+        )
+        assert hasattr(macros, "hologres__validate_logical_partition_definition")
+
+        with pytest.raises(CompilerError, match="logical partition.*--full-refresh"):
+            macros.hologres__validate_logical_partition_definition(
+                relation, configured_columns
+            )
+
+
 class TestLogicalPartitionMacroRendering:
     def test_logical_partition_ddl_quotes_all_column_identifiers(self):
         macros = load_adapters_macros()
@@ -434,11 +535,40 @@ class TestLogicalPartitionMaterializationConfig:
 
         assert "get_create_table_as_sql" not in source_without_comments
         assert "end;" not in source_without_comments
-        assert "adapter.expand_target_column_types" in source
-        assert "process_schema_changes" in source
-        assert source.index("adapter.expand_target_column_types") < source.index(
-            "process_schema_changes"
+        incremental_branch = source[
+            source.index("{% if is_partition_incremental %}"):
+            source.index("{% else %}", source.index("{% if is_partition_incremental %}"))
+        ]
+        source_columns_index = incremental_branch.index(
+            "adapter.get_columns_in_relation(temp_relation)"
         )
+        source_validation_index = incremental_branch.index(
+            "source_columns, incremental_partition_columns"
+        )
+        definition_validation_index = incremental_branch.index(
+            "hologres__validate_logical_partition_definition"
+        )
+        expand_types_index = incremental_branch.index(
+            "adapter.expand_target_column_types"
+        )
+        schema_change_index = incremental_branch.index("process_schema_changes")
+        target_columns_index = incremental_branch.index(
+            "adapter.get_columns_in_relation(target_relation)"
+        )
+        target_validation_index = incremental_branch.index(
+            "target_columns, logical_partition_columns"
+        )
+        dest_validation_index = incremental_branch.index(
+            "dest_columns, incremental_partition_columns"
+        )
+
+        assert source_columns_index < source_validation_index
+        assert source_validation_index < definition_validation_index
+        assert definition_validation_index < expand_types_index
+        assert expand_types_index < schema_change_index
+        assert schema_change_index < target_columns_index
+        assert target_columns_index < target_validation_index
+        assert target_validation_index < dest_validation_index
         assert "hologres__validate_partition_columns" in source
         assert "adapter.rename_relation(existing_relation, backup_relation)" in source
         assert "adapter.rename_relation(intermediate_relation, target_relation)" in source
@@ -462,6 +592,17 @@ class TestIsIncrementalMacro:
                 },
                 False,
                 True,
+            ),
+            (
+                "logical_partition_table",
+                SimpleNamespace(type="table"),
+                {
+                    "logical_partition_key": "ds",
+                    "incremental_partition_key": "ds",
+                    "incremental_strategy": "append",
+                },
+                False,
+                False,
             ),
             (
                 "logical_partition_table",

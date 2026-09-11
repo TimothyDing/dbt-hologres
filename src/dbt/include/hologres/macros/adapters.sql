@@ -43,6 +43,58 @@
   {%- endif -%}
 {%- endmacro %}
 
+{% macro hologres__get_logical_partition_columns(relation) -%}
+  {%- set relation_name = relation.include(database=False) | string -%}
+  {%- set schema_name = relation.schema | replace("'", "''") -%}
+  {%- set table_name = relation.identifier | replace("'", "''") -%}
+  {% call statement('get_logical_partition_columns', fetch_result=True, auto_begin=False) -%}
+    with table_metadata as (
+      select exists (
+        select 1
+        from hologres.hg_table_properties
+        where table_namespace = '{{ schema_name }}'
+          and table_name = '{{ table_name }}'
+          and property_key = 'is_logical_partitioned_table'
+          and property_value in ('true', 't')
+      ) as is_logical_partitioned_table
+    )
+    select
+      is_logical_partitioned_table,
+      case
+        when is_logical_partitioned_table
+          then hg_dump_script('{{ relation_name | replace("'", "''") }}')
+      end as table_ddl
+    from table_metadata
+  {%- endcall %}
+
+  {%- set result = load_result('get_logical_partition_columns').table -%}
+  {%- set partition_columns = [] -%}
+  {%- if result.rows | length > 0 and result.rows[0][0] and result.rows[0][1] is not none -%}
+    {%- set ddl = result.rows[0][1] | string -%}
+    {%- set identifier_pattern = '(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)' -%}
+    {%- set clause_pattern = '(?is)\\blogical\\s+partition\\s+by\\s+list\\s*\\(\\s*(' ~ identifier_pattern ~ '(?:\\s*,\\s*' ~ identifier_pattern ~ ')?)\\s*\\)' -%}
+    {%- set clause_match = modules.re.search(clause_pattern, ddl) -%}
+    {%- if clause_match is not none -%}
+      {%- set column_pattern = '"((?:[^"]|"")*)"|([A-Za-z_][A-Za-z0-9_$]*)' -%}
+      {%- for column_match in modules.re.finditer(column_pattern, clause_match.group(1)) -%}
+        {%- if column_match.group(1) is not none -%}
+          {%- do partition_columns.append(column_match.group(1) | replace('""', '"')) -%}
+        {%- else -%}
+          {%- do partition_columns.append(column_match.group(2) | lower) -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+  {%- endif -%}
+  {{ return(partition_columns) }}
+{%- endmacro %}
+
+{% macro hologres__validate_logical_partition_definition(relation, configured_columns) -%}
+  {%- set actual_columns = hologres__get_logical_partition_columns(relation) -%}
+  {%- if actual_columns != configured_columns -%}
+    {% do exceptions.raise_compiler_error("Existing relation " ~ relation ~ " logical partition columns " ~ actual_columns | join(', ') ~ " do not exactly match logical_partition_key " ~ configured_columns | join(', ') ~ "; use --full-refresh after changing the partition definition") %}
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro hologres__build_table_properties() -%}
   {%- set orientation = config.get('orientation', none) -%}
   {%- set distribution_key = config.get('distribution_key', none) -%}
