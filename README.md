@@ -69,6 +69,7 @@ hologres_project:
 | **HologresAdapter** | Core adapter with PostgreSQL-compatible syntax support |
 | **Psycopg3 Driver** | Uses modern Psycopg 3 library for better performance |
 | **Incremental Strategies** | Multiple strategies: `append`, `delete+insert`, `merge`, `microbatch` |
+| **Logical Partition Incremental Refresh** | Dedicated `logical_partition_table` materialization with partition-level replacement |
 | **Constraints** | Full support for `primary key`, `not null`, `unique`, `foreign key` constraints |
 | **Catalog by Relation** | Enabled for better metadata management |
 
@@ -345,15 +346,17 @@ This project includes comprehensive unit tests with mocked database connections.
 | test_relation.py | 5 | 33 | Relation objects and index management |
 | test_column.py | 9 | 52 | Column handling and data types |
 | test_local_date.py | 22 | 123 | LocalDate date utilities |
-| test_local_date_internals.py | 11 | 19 | LocalDate internal implementation |
+| test_local_date_internals.py | 2 | 19 | LocalDate internal implementation |
 | test_index_config.py | 5 | 34 | Index configuration |
 | test_dynamic_table_config.py | 6 | 49 | Dynamic table configuration |
 | test_sql_macros.py | 6 | 26 | SQL macro rendering |
-| test_logical_partition.py | 5 | 22 | Logical partition tables |
+| test_logical_partition.py | 12 | 48 | Logical partition DDL, validation, materialization, and incremental refresh |
 | test_date_utils_macros.py | 9 | 34 | Date utility macros |
 | test_exception_handling.py | 7 | 22 | Exception handling |
 | test_edge_cases.py | 7 | 62 | Edge cases and boundary conditions |
-| **Total** | **116** | **614** | |
+| **Total** | **119** | **640** | |
+
+Parametrized cases expand the suite to 668 tests during pytest collection and execution.
 
 ### Test Class Descriptions
 
@@ -416,6 +419,14 @@ This project includes comprehensive unit tests with mocked database connections.
 - `TestViewOperations`: View creation and management
 - `TestInsertOperations`: Insert statement generation
 - `TestTimestampOperations`: Timestamp interval operations
+
+#### test_logical_partition.py
+- `TestLogicalPartitionConfig` and `TestPartitionConfigurationMacros`: Configuration parsing and key validation
+- `TestLogicalPartitionMetadata`: Existing logical-partition metadata inspection
+- `TestPartitionStrategySQL`: Partition deletion and insertion SQL
+- `TestLogicalPartitionMaterializationConfig`: Dedicated materialization lifecycle validation
+- `TestIsIncrementalMacro`: Standard and logical-partition incremental conditions
+- `TestLogicalPartitionDDL`: Single-key and two-key DDL generation
 
 ## Running Tests
 
@@ -544,6 +555,9 @@ pytest tests/integration/test_view_operations.py -v
 
 # Run only Hologres-specific feature tests
 pytest tests/integration/test_hologres_features.py -v
+
+# Run only logical-partition incremental integration tests
+pytest tests/integration/test_logical_partition_incremental.py -v
 ```
 
 ### Integration Test Structure
@@ -553,6 +567,7 @@ The integration test suite includes:
 - **test_table_operations.py**: Tests for table creation, updates, deletion, and incremental models
 - **test_view_operations.py**: Tests for view creation, dependencies, and conversions
 - **test_hologres_features.py**: Tests for Hologres-specific features like indexes, dynamic tables, and partitioning
+- **test_logical_partition_incremental.py**: Tests single-key and two-key partition replacement against a live Hologres database
 
 Each test uses an isolated schema to ensure tests don't interfere with each other. Test schemas are automatically cleaned up after each test run.
 
@@ -609,7 +624,7 @@ python -m pytest tests/functional/ -v
 | test_table.py | 9 | Table materialization with indexes, properties |
 | test_incremental.py | 8 | Incremental strategies (append, merge, delete+insert) |
 | test_dynamic_table.py | 8 | Dynamic table creation and auto-refresh |
-| test_logical_partition.py | 9 | Logical partition with single/multiple keys |
+| test_logical_partition.py | 12 | Logical partition creation, incremental refresh, metadata validation, and failure recovery |
 | test_date_utils.py | 10 | LocalDate operations and date macros |
 
 ## Building and Publishing
@@ -669,10 +684,11 @@ Hatchling reads the version automatically from this file during build — no nee
 ### Release Checklist
 
 1. Update version in `src/dbt/adapters/hologres/__version__.py`
-2. Build: `hatch build`
-3. Verify: `hatch run build:check-all`
-4. Publish: `twine upload dist/*`
-5. Tag: `git tag v<version> && git push origin v<version>`
+2. Update `CHANGELOG.md` and user-facing documentation
+3. Build: `hatch build`
+4. Verify: `hatch run build:check-all`
+5. Publish: `twine upload dist/*`
+6. Tag: `git tag v<version> && git push origin v<version>`
 
 ## Resources
 

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-09-12
 
 ### Features
 
@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added the `logical_partition_table` materialization for partition-level `DELETE + INSERT` refreshes
   - Added `incremental_partition_key` and `incremental_strategy='partition'`; `incremental_partition_key` must match `logical_partition_key` in order
   - Preserved the legacy full-rebuild behavior for `materialized='table'` with `logical_partition_key`
+  - Added configuration validation, target metadata validation, safe full-refresh replacement, schema-change handling, and dedicated `is_incremental()` behavior
+
+### Bug Fixes
+
+- **Hologres Compatibility**:
+  - Replaced unsupported composite-key row-value subqueries with correlated `EXISTS` predicates
+  - Updated the two-key example to use scalar boundary subqueries supported by Hologres
+
+### Test Coverage
+
+- Expanded logical-partition coverage to 48 unit test methods (76 collected cases), 13 live functional tests, and 2 live integration tests
 
 ## [1.1.3]
 

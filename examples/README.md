@@ -75,7 +75,7 @@ config:
   on_schema_change: fail
 ```
 
-The example compares `(order_year, order_month)` with the target's latest key tuple. Comparing only `order_year` or `order_month` would select the wrong monthly boundary.
+The example compares the complete ordered `(order_year, order_month)` boundary using scalar subqueries, because Hologres does not support row-value subqueries. Comparing only `order_year` or `order_month` would select the wrong monthly boundary.
 
 #### Partition-incremental behavior and safety
 
