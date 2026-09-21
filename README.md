@@ -70,7 +70,7 @@ hologres_project:
 | **Psycopg3 Driver** | Uses modern Psycopg 3 library for better performance |
 | **Incremental Strategies** | Multiple strategies: `append`, `delete+insert`, `merge`, `microbatch` |
 | **Logical Partition Incremental Refresh** | Dedicated `logical_partition_table` materialization with partition-level replacement |
-| **Constraints** | Full support for `primary key`, `not null`, `unique`, `foreign key` constraints |
+| **Constraints** | Full support for `primary key`, `not null`, `unique`, `foreign key`, `check` constraints |
 | **Catalog by Relation** | Enabled for better metadata management |
 
 ### Table Properties Configuration
@@ -132,17 +132,23 @@ Dynamic Tables are Hologres's implementation of materialized views with automati
 models:
   my_model:
     materialized: dynamic_table
-    freshness: "30 minutes"
+    target_lag: "30 minutes"
+    auto_refresh_enable: true
     auto_refresh_mode: auto
     computing_resource: serverless
+    orientation: column
 ```
 
 Supported configurations:
 
-- `freshness`: Data freshness requirement (e.g., "30 minutes", "1 hours")
-- `auto_refresh_mode`: `auto`, `incremental`, or `full`
-- `computing_resource`: `serverless`, `local`, or warehouse name
-- Logical partitioning support for time-series data
+- `target_lag` *(required)*: Data freshness requirement (e.g., "30 minutes", "1 hours")
+- `auto_refresh_enable`: Enable or disable auto-refresh (default: `true`)
+- `auto_refresh_mode`: `auto`, `incremental`, or `full` (default: `auto`)
+- `computing_resource`: `serverless`, `local`, or warehouse name (default: `serverless`)
+- `orientation`: Storage direction: `column` or `row` (default: `column`)
+- `distribution_key`: Distribution key for data sharding
+- `clustering_key`: Clustering key for query optimization
+- `event_time_column`: Event time column for time-series data
 
 ### Logical Partition Tables
 
@@ -206,7 +212,7 @@ The adapter provides a powerful `LocalDate` class for date manipulation in Jinja
 | **Period Boundaries** | `start_of_month()`, `end_of_month()`, `start_of_quarter()`, `end_of_quarter()`, `start_of_year()`, `end_of_year()`, `start_of_week()`, `end_of_week()` |
 | **Formatting** | `format()`, `str()`, `to_sql()` |
 | **Comparison** | `is_before()`, `is_after()`, `is_equal()`, `days_between()` |
-| **Properties** | `year`, `month`, `day`, `quarter`, `day_of_year` |
+| **Properties** | `year`, `month`, `day`, `quarter`, `day_of_week`, `day_of_year` |
 
 #### Helper Functions
 
@@ -260,6 +266,8 @@ The following macros are available for date operations:
 | `today()` | Get today's date as LocalDate |
 | `ds()` | Get execution date from `EXECUTION_DATE` variable or environment |
 | `format_date(local_date, format_str)` | Format LocalDate to string |
+| `date_range(start_date, end_date)` | Generate list of dates between two dates (inclusive) |
+| `months_between(start_date, end_date)` | Calculate approximate number of months between two dates |
 
 **Example usage in SQL:**
 
@@ -287,12 +295,14 @@ select
 | `user` | Yes | - | Username (case-sensitive) |
 | `password` | Yes | - | Password (case-sensitive) |
 | `database` | Yes | - | Database name |
-| `schema` | Yes | "" | Default schema (use empty string "" if not needed) |
+| `schema` | No | "" | Default schema (use empty string "" if not needed) |
 | `threads` | No | 1 | Number of threads for parallel execution |
 | `connect_timeout` | No | 10 | Connection timeout in seconds |
 | `sslmode` | No | disable | SSL mode (disabled by default) |
+| `role` | No | - | Role to set after connecting |
+| `search_path` | No | - | PostgreSQL search path to set after connecting |
 | `application_name` | No | dbt_hologres_{version} | Application identifier |
-| `retries` | No | 1 | Number of connection retries |
+| `retries` | No | 1 | Number of connection retries (quadratic backoff) |
 
 ### Testing Your Connection
 
@@ -325,6 +335,7 @@ my_hologres_project/
 3. **SSL Mode**: SSL is disabled by default for Hologres connections
 4. **Psycopg3**: This adapter uses Psycopg 3, which has API differences from Psycopg 2
 5. **Model Name Restrictions**: Model names must not exceed 27 characters and are case-insensitive (converted to lowercase)
+6. **Connection Retry**: Uses quadratic backoff (attempt²) for connection retries instead of exponential backoff
 
 ### Supported dbt Versions
 
@@ -591,12 +602,19 @@ tests/functional/
 ├── conftest.py              # dbt test framework configuration
 ├── fixtures.py              # Shared test models and seeds
 ├── test_basic.py            # Basic dbt run, seed, compile tests
+├── test_constraints.py            # Constraint enforcement tests
+├── test_custom_naming.py          # Custom schema naming tests
+├── test_date_utils.py             # Date utility macro tests
+├── test_error_handling.py         # Error handling and invalid input tests
+├── test_logical_partition.py      # Logical partition tests
+├── test_on_schema_change.py       # on_schema_change behavior tests
+├── test_sql_header.py             # sql_header / GUC parameter tests
+├── test_table_properties.py       # Table properties configuration tests
 ├── test_materializations/
 │   ├── test_table.py        # Table materialization tests
+│   ├── test_view.py               # View materialization tests
 │   ├── test_incremental.py  # Incremental model tests
 │   └── test_dynamic_table.py # Dynamic table tests
-├── test_logical_partition.py # Logical partition tests
-└── test_date_utils.py       # Date utility macro tests
 ```
 
 ### Running Functional Tests
@@ -621,11 +639,18 @@ python -m pytest tests/functional/ -v
 | Test File | Test Classes | Coverage |
 |-----------|--------------|----------|
 | test_basic.py | 5 | Basic run, seed, compile, test operations |
-| test_table.py | 9 | Table materialization with indexes, properties |
-| test_incremental.py | 8 | Incremental strategies (append, merge, delete+insert) |
-| test_dynamic_table.py | 8 | Dynamic table creation and auto-refresh |
-| test_logical_partition.py | 12 | Logical partition creation, incremental refresh, metadata validation, and failure recovery |
+| test_constraints.py | 8 | Not null, unique, primary key, foreign key, check, composite PK constraints |
+| test_custom_naming.py | 9 | Custom schema names, model naming conventions |
 | test_date_utils.py | 10 | LocalDate operations and date macros |
+| test_error_handling.py | 10 | Invalid SQL, circular dependencies, invalid configs, missing refs |
+| test_logical_partition.py | 12 | Logical partition creation, incremental refresh, metadata validation, and failure recovery |
+| test_on_schema_change.py | 6 | Schema change behaviors: ignore, append, sync, with merge/delete+insert |
+| test_sql_header.py | 7 | sql_header with table, view, incremental, dynamic table, GUC parameters |
+| test_table_properties.py | 9 | Event time, segment key alias, bitmap, dictionary encoding, combined properties |
+| test_materializations/test_table.py | 9 | Table materialization with indexes, properties, distribution keys |
+| test_materializations/test_view.py | 6 | View creation, dependencies, aggregation, join, filter |
+| test_materializations/test_incremental.py | 13 | Incremental strategies (append, merge, delete+insert, microbatch) |
+| test_materializations/test_dynamic_table.py | 11 | Dynamic table creation, auto-refresh, partitions, indexes, computing resource |
 
 ## Building and Publishing
 
@@ -634,14 +659,13 @@ python -m pytest tests/functional/ -v
 This project uses [Hatchling](https://hatch.pypa.io/) as the build backend.
 
 ```bash
-# Install hatch (if not already installed)
+# Option 1: Using hatch (if installed)
 pip install hatch
-
-# Build wheel and sdist (output to dist/)
 hatch build
 
-# Build wheel only
-hatch build -t wheel
+# Option 2: Using python -m build (recommended for CI)
+pip install build
+python -m build
 ```
 
 ### Verify
@@ -650,6 +674,10 @@ Validate the built package before publishing:
 
 ```bash
 hatch run build:check-all
+
+# Or using twine directly
+pip install twine
+twine check dist/*
 ```
 
 This runs `twine check` and installation verification to ensure package quality.
@@ -686,7 +714,7 @@ Hatchling reads the version automatically from this file during build — no nee
 1. Update version in `src/dbt/adapters/hologres/__version__.py`
 2. Update `CHANGELOG.md` and user-facing documentation
 3. Build: `hatch build`
-4. Verify: `hatch run build:check-all`
+4. Verify: `hatch run build:check-all` or `twine check dist/*`
 5. Publish: `twine upload dist/*`
 6. Tag: `git tag v<version> && git push origin v<version>`
 
@@ -704,5 +732,5 @@ Apache License 2.0
 
 For issues and questions:
 
-- [GitHub Issues](https://github.com/dbt-labs/dbt-adapters/issues)
+- [GitHub Issues](https://github.com/aliyun/dbt-hologres/issues)
 - [dbt Community Slack](https://www.getdbt.com/community/)

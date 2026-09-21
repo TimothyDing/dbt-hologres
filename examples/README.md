@@ -48,6 +48,10 @@ dbt docs serve    # Serve documentation at http://localhost:8080
 
 ### 5. Table with Properties
 `models/marts/table_with_properties.sql` - Table with Hologres-specific properties (orientation, distribution_key, etc.)
+### 5b. Table with Serverless Computing
+`models/marts/dml_use_serverless_computing.sql` - Table using `sql_header` to set `hg_computing_resource = 'serverless'` for serverless SQL execution
+### 5c. GUC Parameter Demo
+`models/sql_header_guc_demo.sql` - Set session-level GUC parameters (e.g., timezone) via `sql_header`
 
 ### 6. Incremental Logical Partition Table (Single Key)
 `models/marts/logical_partition_table.sql` - Partition-incremental table keyed by the DATE column `ds`
